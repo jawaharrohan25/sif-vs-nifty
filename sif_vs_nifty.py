@@ -1,6 +1,10 @@
 """
-Daily % change (bars) and cumulative return (lines) for several SIF schemes vs Nifty 50,
-last 15 common sessions. One chart + one CSV per scheme, written to ./charts/.
+SIF schemes vs Nifty 50: daily and monthly charts.
+
+For each scheme this writes, into ./charts/:
+  sif_<code>.png / .csv           daily % change (bars) + cumulative return (lines), last N_DAYS sessions
+  sif_<code>_monthly.png / .csv   monthly % change (bars) + cumulative return (lines), last N_MONTHS months
+and regenerates README.md with all the charts.
 
 Install:  pip install requests pandas yfinance matplotlib
 Run:      python sif_vs_nifty.py
@@ -8,8 +12,9 @@ Run:      python sif_vs_nifty.py
 Add or remove funds in SCHEMES below (Charlie internal code or ISIN).
 Find ISINs with: https://api.charliealpha.in/v1/sif/search?q=quant
 SIF NAVs come from the free Charlie API; Nifty closes from yfinance (^NSEI).
-Only dates present in BOTH series are used, so each bar compares the same
-session-to-session move for the fund and the index.
+Only dates present in BOTH series are used, so each bar compares the same period for
+the fund and the index. Monthly bars use each month's last common trading day, and the
+current month is shown month-to-date (marked with *).
 """
 import re
 import sys
@@ -27,7 +32,8 @@ import yfinance as yf
 SCHEMES = ["1", "5", "90", "23"]
 
 BASE_URL = "https://api.charliealpha.in/v1/sif/hnav/"
-N_DAYS = 15
+N_DAYS = 30      # daily chart: last N common sessions
+N_MONTHS = 12    # monthly chart: last N months
 OUT_DIR = Path(__file__).resolve().parent / "charts"
 
 HEADERS = {
@@ -38,6 +44,10 @@ HEADERS = {
     "Accept": "application/json",
     "Referer": "https://api.charliealpha.in/",
 }
+
+
+class NotEnoughData(Exception):
+    """Fund/Nifty overlap is too short for this chart (expected for new funds)."""
 
 
 def get_json(url, tries=4):
@@ -61,61 +71,91 @@ def sif_navs(code):
 
 
 def nifty_closes():
-    h = yf.Ticker("^NSEI").history(period="3mo", auto_adjust=False)
+    # 2y covers both the 30-session daily view and the 12-month monthly view.
+    h = yf.Ticker("^NSEI").history(period="2y", auto_adjust=False)
     s = h["Close"].copy()
     s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
     s.name = "nifty_close"
     return s
 
 
-def build(sif, nifty):
+def _add_cumulative(out):
+    # Cumulative return since the close BEFORE the first bar (that point = 0%).
+    out["SIF cum %"] = ((1 + out["SIF % chg"] / 100).cumprod() - 1) * 100
+    out["Nifty 50 cum %"] = ((1 + out["Nifty 50 % chg"] / 100).cumprod() - 1) * 100
+    return out
+
+
+def build_daily(sif, nifty):
     df = pd.concat([sif, nifty], axis=1, join="inner").sort_index()
     pct = df.pct_change() * 100
     pct.columns = ["SIF % chg", "Nifty 50 % chg"]
     out = pd.concat([df, pct], axis=1).dropna().tail(N_DAYS)
     if out.empty:
-        raise ValueError("no overlapping dates between the fund and Nifty")
-    # Cumulative return since the close BEFORE the first bar (that day = 0%).
-    out["SIF cum %"] = ((1 + out["SIF % chg"] / 100).cumprod() - 1) * 100
-    out["Nifty 50 cum %"] = ((1 + out["Nifty 50 % chg"] / 100).cumprod() - 1) * 100
-    base_date = df.index[df.index.get_loc(out.index[0]) - 1]
-    return out, base_date
+        raise NotEnoughData("no overlapping dates between the fund and Nifty")
+    base_label = df.index[df.index.get_loc(out.index[0]) - 1].strftime("%d %b")
+    bar_labels = [d.strftime("%d %b") for d in out.index]
+    return _add_cumulative(out), base_label, bar_labels, None
 
 
-def plot(out, base_date, label, path):
+def build_monthly(sif, nifty):
+    df = pd.concat([sif, nifty], axis=1, join="inner").sort_index()
+    per = df.index.to_period("M")
+    lvl = df.groupby(per).last()                       # last common trading day's level per month
+    last_day = df.index.to_series().groupby(per).last()  # which day that was
+    pct = lvl.pct_change() * 100
+    pct.columns = ["SIF % chg", "Nifty 50 % chg"]
+    out = pd.concat([lvl, pct], axis=1).dropna().tail(N_MONTHS)
+    if out.empty:
+        raise NotEnoughData("need at least two month-ends of overlapping data")
+    base_label = lvl.index[lvl.index.get_loc(out.index[0]) - 1].strftime("%b '%y")
+    bar_labels = [p.strftime("%b '%y") for p in out.index]
+    footnote = None
+    newest = out.index[-1]
+    if last_day[newest].normalize() < newest.end_time.normalize():
+        bar_labels[-1] += "*"
+        footnote = f"* month to date (to {last_day[newest]:%d %b %Y})"
+    out = _add_cumulative(out)
+    out.index = out.index.astype(str)
+    return out, base_label, bar_labels, footnote
+
+
+def plot(out, base_label, bar_labels, label, path, kind, footnote=None):
     n = len(out)
-    labels = [base_date.strftime("%d %b")] + [d.strftime("%d %b") for d in out.index]
+    unit = "daily" if kind == "daily" else "monthly"
+    span = f"last {n} common sessions" if kind == "daily" else f"last {n} months"
+    labels = [base_label] + bar_labels
     blue, grey = "#1f6feb", "#6b7686"
+    width = 12 if n <= 15 else 16
     fig, (ax, ax2) = plt.subplots(
-        2, 1, figsize=(12, 9.5), sharex=True, gridspec_kw={"height_ratios": [3, 2.4]}
+        2, 1, figsize=(width, 9.5), sharex=True, gridspec_kw={"height_ratios": [3, 2.4]}
     )
 
-    # --- Top: daily % change bars (bar i sits at x = i + 1; x = 0 is the base day) ---
+    # --- Top: % change bars (bar i sits at x = i + 1; x = 0 is the base point) ---
     xs = [i + 1 for i in range(n)]
     w = 0.4
     b1 = ax.bar([x - w / 2 for x in xs], out["SIF % chg"], w, label=label, color=blue)
     b2 = ax.bar([x + w / 2 for x in xs], out["Nifty 50 % chg"], w,
                 label="Nifty 50", color="#9aa4b2")
     ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_ylabel("Daily change (%)")
-    ax.set_title(f"{label} vs Nifty 50: daily % change, last {n} common sessions "
-                 f"(to {out.index[-1]:%d %b %Y})")
-    ax.bar_label(b1, fmt="%.2f", fontsize=7, padding=2)
-    ax.bar_label(b2, fmt="%.2f", fontsize=7, padding=2)
+    ax.set_ylabel(f"{unit.capitalize()} change (%)")
+    ax.set_title(f"{label} vs Nifty 50: {unit} % change, {span}")
+    fs = 7 if n <= 15 else 5.5
+    ax.bar_label(b1, fmt="%.2f", fontsize=fs, padding=2)
+    ax.bar_label(b2, fmt="%.2f", fontsize=fs, padding=2)
     ax.legend(loc="upper left")
     ax.grid(axis="y", alpha=0.3)
 
-    # --- Bottom: cumulative return lines, both start at 0% on the base day ---
+    # --- Bottom: cumulative return lines, both start at 0% at the base point ---
     xl = [0] + xs
     sif_cum = [0.0] + list(out["SIF cum %"])
     nif_cum = [0.0] + list(out["Nifty 50 cum %"])
     ax2.plot(xl, sif_cum, color=blue, marker="o", markersize=4, linewidth=2, label=label)
-    ax2.plot(xl, nif_cum, color=grey, marker="o", markersize=4, linewidth=2,
-             label="Nifty 50")
+    ax2.plot(xl, nif_cum, color=grey, marker="o", markersize=4, linewidth=2, label="Nifty 50")
     ax2.axhline(0, color="black", linewidth=0.8)
     ax2.fill_between(xl, sif_cum, nif_cum, color=blue, alpha=0.08)
     ax2.set_ylabel("Cumulative return (%)")
-    ax2.set_title(f"Cumulative return since {base_date:%d %b} close")
+    ax2.set_title(f"Cumulative return since {base_label} close")
     ax2.grid(alpha=0.3)
     ax2.legend(loc="upper left")
     ax2.annotate(f"{sif_cum[-1]:+.2f}%", (xl[-1], sif_cum[-1]), xytext=(8, 0),
@@ -127,6 +167,8 @@ def plot(out, base_date, label, path):
     ax2.set_xticks(range(n + 1))
     ax2.set_xticklabels(labels, rotation=45, ha="right")
     fig.tight_layout()
+    if footnote:
+        fig.text(0.01, 0.005, footnote, fontsize=8, color=grey)
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
@@ -137,7 +179,8 @@ def slug(text):
 
 def clean_name(api_name):
     """'qsif Equity Long Short Fund - Growth Option - Direct Plan' -> 'qsif Equity Long Short Fund (Direct)'"""
-    plan = "Direct" if "direct" in api_name.lower() else ("Regular" if "regular" in api_name.lower() else "")
+    low = api_name.lower()
+    plan = "Direct" if "direct" in low else ("Regular" if "regular" in low else "")
     base = api_name.split(" - ")[0].strip()
     return f"{base} ({plan})" if plan else base
 
@@ -145,22 +188,42 @@ def clean_name(api_name):
 def write_readme(done):
     lines = [
         "# SIF funds vs Nifty 50", "",
-        "Daily % change (bars) and cumulative return (lines) of each fund against Nifty 50 for the",
-        f"last {N_DAYS} common sessions. Updated automatically by GitHub Actions on weekday mornings.", "",
+        f"Daily (last {N_DAYS} sessions) and monthly (last {N_MONTHS} months) % change as bars, with",
+        "cumulative return as lines, for each fund against Nifty 50.",
+        "Updated automatically by GitHub Actions on weekday mornings.", "",
     ]
-    for label, code in done:
-        lines += [f"### {label}", f"![{label}](charts/sif_{slug(code)}.png)", ""]
+    for label, code, has_daily, has_monthly in done:
+        s = f"sif_{slug(code)}"
+        lines += [f"## {label}", ""]
+        if has_monthly:
+            lines += [f"### Monthly, last {N_MONTHS} months", f"![{label} monthly](charts/{s}_monthly.png)", ""]
+        if has_daily:
+            lines += [f"### Daily, last {N_DAYS} sessions", f"![{label} daily](charts/{s}.png)", ""]
     lines += [
         "- Fund NAVs: free Charlie API (`/v1/sif/hnav/{code}`)",
         "- Nifty 50 closes: yfinance (`^NSEI`)",
         "- Data tables: the `.csv` files in [`charts/`](charts/)",
-        "- Add or change funds: edit the `SCHEMES` list at the top of `sif_vs_nifty.py`",
-        "- This file is regenerated on every run",
-        "",
-        "Only dates present in both series are used, so each bar compares the same session-to-session move.",
+        "- Add or change funds: edit `SCHEMES` at the top of `sif_vs_nifty.py`",
+        "- New funds show fewer months until they have enough history",
+        "- This file is regenerated on every run", "",
+        "Only dates present in both series are used, so each bar compares the same period.",
         "For education and research, not investment advice.", "",
     ]
     (OUT_DIR.parent / "README.md").write_text("\n".join(lines))
+
+
+def run_one(builder, sif, nifty, label, name, kind):
+    """Build + save one chart. Returns True if produced, False if skipped (too little data)."""
+    try:
+        table, base, bar_labels, note = builder(sif, nifty)
+    except NotEnoughData as e:
+        print(f"   skipped {kind} chart for {label}: {e}")
+        return False
+    table.round(4).to_csv(OUT_DIR / f"{name}.csv", index_label="date")
+    plot(table, base, bar_labels, label, OUT_DIR / f"{name}.png", kind, note)
+    print(f"\n== {label} ({kind}) ==")
+    print(table.round(2).to_string())
+    return True
 
 
 if __name__ == "__main__":
@@ -173,18 +236,17 @@ if __name__ == "__main__":
 
     failures, done = [], []
     for code in SCHEMES:
+        code = str(code)
         try:
-            sif, api_name = sif_navs(str(code))
+            sif, api_name = sif_navs(code)
             label = clean_name(api_name)
-            table, base = build(sif, nifty)
-            name = f"sif_{slug(str(code))}"
-            table.round(4).to_csv(OUT_DIR / f"{name}.csv", index_label="date")
-            plot(table, base, label, OUT_DIR / f"{name}.png")
-            done.append((label, str(code)))
-            print(f"\n== {label}  [code {code}] ==")
-            print(table.round(2).to_string())
+            base = f"sif_{slug(code)}"
+            d = run_one(build_daily, sif, nifty, label, base, "daily")
+            m = run_one(build_monthly, sif, nifty, label, f"{base}_monthly", "monthly")
+            if d or m:
+                done.append((label, code, d, m))
         except Exception as e:
-            failures.append(str(code))
+            failures.append(code)
             print(f"\n!! code {code} failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     if done:
