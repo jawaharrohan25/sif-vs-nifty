@@ -4,7 +4,7 @@ SIF schemes vs Nifty 50: daily and monthly charts.
 For each scheme this writes, into ./charts/:
   sif_<code>.png / .csv           daily % change (bars) + cumulative return (lines), last N_DAYS sessions
   sif_<code>_monthly.png / .csv   monthly % change (bars) + cumulative return (lines), last N_MONTHS months
-and regenerates README.md with all the charts.
+and regenerates README.md and index.html (a web page for GitHub Pages) with all the charts.
 
 Install:  pip install requests pandas yfinance matplotlib
 Run:      python sif_vs_nifty.py
@@ -212,6 +212,50 @@ def write_readme(done):
     (OUT_DIR.parent / "README.md").write_text("\n".join(lines))
 
 
+def write_index(done):
+    """Static web page (index.html) with every chart, for GitHub Pages."""
+    import html
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    v = now.strftime("%Y%m%d%H%M")  # cache-buster so browsers fetch the fresh images
+    nav = " ".join(f'<a href="#f{slug(c)}">{html.escape(l)}</a>' for l, c, _, _ in done)
+    cards = []
+    for label, code, has_daily, has_monthly in done:
+        s_ = f"sif_{slug(code)}"
+        imgs = ""
+        if has_monthly:
+            imgs += (f'<h3>Monthly, last {N_MONTHS} months</h3>'
+                     f'<img src="charts/{s_}_monthly.png?v={v}" alt="{html.escape(label)} monthly" loading="lazy">')
+        if has_daily:
+            imgs += (f'<h3>Daily, last {N_DAYS} sessions</h3>'
+                     f'<img src="charts/{s_}.png?v={v}" alt="{html.escape(label)} daily" loading="lazy">')
+        cards.append(f'<section id="f{slug(code)}"><h2>{html.escape(label)}</h2>{imgs}</section>')
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIF vs Nifty</title>
+<style>
+:root{{--bg:#f6f8fa;--card:#fff;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--link:#0969da}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--link:#58a6ff}}}}
+body{{margin:0;padding:0 16px 40px;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}}
+main{{max-width:1100px;margin:0 auto}}
+h1{{margin:24px 0 4px}} .sub{{color:var(--muted);margin:0 0 16px}}
+nav{{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 20px}}
+nav a{{padding:6px 12px;border:1px solid var(--line);border-radius:999px;color:var(--link);text-decoration:none;background:var(--card)}}
+section{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 16px 16px;margin:0 0 20px}}
+h3{{color:var(--muted);font-size:14px;font-weight:600;margin:16px 0 6px}}
+img{{width:100%;height:auto;border-radius:8px;background:#fff}}
+footer{{color:var(--muted);font-size:13px}}
+</style></head><body><main>
+<h1>SIF funds vs Nifty 50</h1>
+<p class="sub">Daily and monthly % change (bars) with cumulative return (lines). Updated {now:%d %b %Y %H:%M} UTC.</p>
+<nav>{nav}</nav>
+{"".join(cards)}
+<footer>Fund NAVs: Charlie API. Nifty 50: Yahoo Finance. For education and research, not investment advice.</footer>
+</main></body></html>"""
+    (OUT_DIR.parent / "index.html").write_text(page)
+
+
 def run_one(builder, sif, nifty, label, name, kind):
     """Build + save one chart. Returns True if produced, False if skipped (too little data)."""
     try:
@@ -251,6 +295,7 @@ if __name__ == "__main__":
 
     if done:
         write_readme(done)
+        write_index(done)
     print(f"\nCharts saved in: {OUT_DIR}")
     if failures:
         print(f"Failed codes: {', '.join(failures)}", file=sys.stderr)
