@@ -10,6 +10,7 @@ Only dates present in BOTH series are used, so each bar compares the same
 session-to-session move for the fund and the index.
 """
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -24,10 +25,32 @@ N_DAYS = 15
 OUT_DIR = Path(__file__).resolve().parent
 
 
+HEADERS = {
+    # Some hosts reject the default python-requests User-Agent (403), especially
+    # from cloud/CI IP ranges, so identify like a normal browser.
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "application/json",
+    "Referer": "https://api.charliealpha.in/",
+}
+
+
+def get_json(url, tries=4):
+    last = None
+    for i in range(tries):
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+        last = r
+        print(f"{url} -> HTTP {r.status_code}: {r.text[:200]!r}", file=sys.stderr)
+        if r.status_code not in (403, 429, 500, 502, 503, 504):
+            break
+        time.sleep(5 * (i + 1))
+    last.raise_for_status()
+
+
 def sif_navs():
-    r = requests.get(SIF_URL, headers={"Accept": "application/json"}, timeout=30)
-    r.raise_for_status()
-    j = r.json()
+    j = get_json(SIF_URL)
     s = pd.Series(pd.to_numeric(j["nav"]), index=pd.to_datetime(j["dates"]), name="sif_nav")
     return s
 
