@@ -1,4 +1,4 @@
-name: Daily SIF vs Nifty chart
+name: Daily SIF vs Nifty charts
 
 on:
   schedule:
@@ -27,17 +27,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build chart and table
+      - name: Build charts and tables
         run: python sif_vs_nifty.py
 
       - name: Commit results
+        if: always()   # still publish the charts that succeeded if one fund fails
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add sif_vs_nifty.png sif_vs_nifty_log.csv
+          git add charts/ README.md
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update SIF vs Nifty chart ($(date -u +%F))"
+            git commit -m "Update SIF vs Nifty charts ($(date -u +%F))"
             git push
           fi
