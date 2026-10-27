@@ -1,0 +1,43 @@
+name: Daily SIF vs Nifty chart
+
+on:
+  schedule:
+    # 03:30 UTC = 09:00 IST = 06:30 Riyadh, Tue-Sat (picks up the previous session's NAV)
+    - cron: "30 3 * * 2-6"
+  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-chart
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build chart and table
+        run: python sif_vs_nifty.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sif_vs_nifty.png sif_vs_nifty_log.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update SIF vs Nifty chart ($(date -u +%F))"
+            git push
+          fi
